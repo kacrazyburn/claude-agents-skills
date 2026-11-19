@@ -51,7 +51,8 @@ FORMATTED := README.md Makefile .gitignore .pre-commit-config.yaml scripts/rende
 .PHONY: engine sync parity lint format test test-unit test-integration test-e2e init hooks up down \
         local-depends
 
-# Idempotent by the stamp $(ENGINE_DIR)/.sdlc-built (= ENGINE_REF). Full clone with --no-local (no
+# Idempotent by the stamp $(ENGINE_DIR)/.sdlc-built (= full SHA of ENGINE_REF, so an abbreviated
+# ENGINE_REF does not force a rebuild). Full clone with --no-local (no
 # hardlinks/alternates into someone else's checkout); the pinned SHA is fetched explicitly, so it need
 # not be reachable from a branch of ENGINE_GIT. Nothing on stdout.
 engine:
@@ -59,7 +60,11 @@ engine:
 	  echo 'engine: ENGINE_GIT is not set (path or URL of the engine repo)' >&2; exit 2; \
 	fi
 	$(if $(DRY_RUN),echo 'engine: skipped under make -n' >&2; exit 0;) \
-	if [ "$$(cat '$(ENGINE_DIR)/.sdlc-built' 2>/dev/null || true)" = '$(ENGINE_REF)' ]; then exit 0; fi; \
+	want='$(ENGINE_REF)'; \
+	if [ -d '$(ENGINE_DIR)/.git' ]; then \
+	  want="$$(git -C '$(ENGINE_DIR)' rev-parse -q --verify '$(ENGINE_REF)^{commit}' 2>/dev/null || echo '$(ENGINE_REF)')"; \
+	fi; \
+	if [ "$$(cat '$(ENGINE_DIR)/.sdlc-built' 2>/dev/null || true)" = "$$want" ]; then exit 0; fi; \
 	if [ ! -d '$(ENGINE_DIR)/.git' ]; then \
 	  mkdir -p '$(dir $(ENGINE_DIR))'; \
 	  git clone -q --no-local --no-checkout '$(ENGINE_GIT)' '$(ENGINE_DIR)' >&2; \
@@ -70,32 +75,38 @@ engine:
 	$(MAKE) -C '$(ENGINE_DIR)' MAKEFLAGS= install build >&2; \
 	git -C '$(ENGINE_DIR)' rev-parse HEAD > '$(ENGINE_DIR)/.sdlc-built'
 
-# Rewrite the copies with the engine render at ENGINE_REF (R5): render to <path>.tmp, then mv.
+# Rewrite the copies with the engine render at ENGINE_REF (R5): render to a temp file in .scratch/,
+# then mv over the copy. A failed render leaves the copy untouched and no stray file behind.
 sync: engine
+	mkdir -p .scratch
+	t="$$(mktemp $(CURDIR)/.scratch/sync.XXXXXX)"; trap 'rm -f "$$t"' EXIT; rc=0; \
 	for f in $(COPIES); do \
+	  if ! $(RUN_NODE) "$$f" > "$$t"; then echo "sync: render failed for $$f" >&2; rc=1; continue; fi; \
 	  mkdir -p "$$(dirname "$$f")"; \
-	  $(RUN_NODE) "$$f" > "$$f.tmp"; \
-	  mv "$$f.tmp" "$$f"; \
-	done
+	  chmod 644 "$$t"; mv "$$t" "$$f"; \
+	done; \
+	exit "$$rc"
 
 # Compare every copy with the render and check that README carries every engine line (R4, R8).
-# All mismatches are reported, no early exit.
+# All mismatches and render failures are reported, no early exit.
 parity: engine
 	mkdir -p .scratch
-	t="$$(mktemp $(CURDIR)/.scratch/parity.XXXXXX)"; rc=0; \
+	t="$$(mktemp $(CURDIR)/.scratch/parity.XXXXXX)"; trap 'rm -f "$$t"' EXIT; rc=0; \
 	for f in $(COPIES); do \
-	  $(RUN_NODE) "$$f" > "$$t"; \
+	  if ! $(RUN_NODE) "$$f" > "$$t"; then echo "parity: render failed for $$f" >&2; rc=1; continue; fi; \
 	  if ! diff -u "$$f" "$$t" >&2; then \
 	    echo "parity: $$f differs from engine render at $(ENGINE_REF)" >&2; rc=1; \
 	  fi; \
 	done; \
-	$(RUN_NODE) readme-lines > "$$t"; \
-	while IFS= read -r line; do \
-	  if ! grep -F -x -e "$$line" README.md > /dev/null; then \
-	    echo "parity: README.md lacks line: $$line" >&2; rc=1; \
-	  fi; \
-	done < "$$t"; \
-	rm "$$t"; \
+	if ! $(RUN_NODE) readme-lines > "$$t"; then \
+	  echo 'parity: render failed for readme-lines' >&2; rc=1; \
+	else \
+	  while IFS= read -r line; do \
+	    if ! grep -F -x -e "$$line" README.md > /dev/null; then \
+	      echo "parity: README.md lacks line: $$line" >&2; rc=1; \
+	    fi; \
+	  done < "$$t"; \
+	fi; \
 	if [ "$$rc" = 0 ]; then echo 'parity: OK (ENGINE_REF $(ENGINE_REF))'; fi; \
 	exit "$$rc"
 
