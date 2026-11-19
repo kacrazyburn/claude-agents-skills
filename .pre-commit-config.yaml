@@ -1,0 +1,21 @@
+# Hooks call make targets: the tool configuration lives in the Makefile.
+repos:
+  - repo: local
+    hooks:
+      - id: make-lint
+        name: make lint
+        entry: make lint
+        language: system
+        pass_filenames: false
+      - id: make-format
+        name: make format
+        entry: make format
+        language: system
+        pass_filenames: false
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: no-commit-to-branch
+        args: [--branch, dev, --branch, release]
